@@ -1,0 +1,303 @@
+// VoicePilot AI — Prisma data model
+// Multi-tenant: every tenant-scoped record belongs to an Organization.
+// Server code MUST scope all queries by organizationId (see lib/tenant.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- users/auth
+model User {
+  id             String       @id @default(cuid())
+  email          String       @unique
+  name           String?
+  passwordHash   String
+  isPlatformAdmin Boolean     @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  memberships    Membership[]
+  sessions       Session[]
+  auditLogs      AuditLog[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ------------------------------------------------------------------ tenancy
+model Organization {
+  id          String       @id @default(cuid())
+  name        String
+  planKey     String       @default("free")
+  plan        BillingPlan? @relation(fields: [planKey], references: [key])
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  memberships Membership[]
+  workspaces  Workspace[]
+  auditLogs   AuditLog[]
+}
+
+model Membership {
+  id        String   @id @default(cuid())
+  userId    String
+  orgId     String
+  role      String   @default("member") // owner | admin | member
+  createdAt DateTime @default(now())
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+}
+
+model Workspace {
+  id               String            @id @default(cuid())
+  orgId            String
+  org              Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name             String
+  category         String            @default("general") // home-services, dental, real-estate, ...
+  timezone         String            @default("America/New_York")
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  agents           Agent[]
+  contacts         Contact[]
+  knowledgeSources KnowledgeSource[]
+  integrations     Integration[]
+  providerConfigs  ProviderConfig[]
+  callLogs         CallLog[]
+  usageRecords     UsageRecord[]
+  phoneNumbers     PhoneNumber[]
+  // Retention + recording policy (per-workspace, admin-configurable)
+  dataRetentionDays Int     @default(365)
+  recordingEnabled  Boolean @default(false) // recordings OFF by default; explicit opt-in only
+
+  @@index([orgId])
+}
+
+// ------------------------------------------------------------------- agents
+model Agent {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  templateKey String?
+  name        String
+  status      String    @default("draft") // draft | published | archived
+  config      Json      // AgentConfig (see lib/agent-config.ts)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  callLogs    CallLog[]
+
+  @@index([workspaceId])
+}
+
+model AgentTemplate {
+  id            String   @id @default(cuid())
+  key           String   @unique // e.g. "home-services"
+  name          String
+  category      String
+  description   String
+  defaultConfig Json     // AgentConfig starter
+  isSystem      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+}
+
+// --------------------------------------------------------------- knowledge
+model KnowledgeSource {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  type        String    // faq | text | document | url
+  title       String
+  content     String    @db.Text
+  status      String    @default("ready") // pending | ready | failed | not-implemented
+  errorMessage String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------- contacts
+model Contact {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name          String?
+  phone         String
+  doNotCall     Boolean   @default(false)
+  consentStatus String    @default("unknown") // unknown | express | written | revoked
+  createdAt     DateTime  @default(now())
+
+  @@index([workspaceId])
+  @@index([phone])
+}
+
+// ---------------------------------------------------------------- call logs
+model CallLog {
+  id               String    @id @default(cuid())
+  workspaceId      String
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agentId          String
+  agent            Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  direction        String    @default("inbound") // inbound | outbound
+  status           String    @default("answered") // answered | missed | failed | transferred
+  startedAt        DateTime  @default(now())
+  durationSec      Int       @default(0)
+  transcript       Json      // [{role: "agent"|"caller", text, at}]
+  summary          String?
+  outcome          Json?     // {type: "booking"|"lead"|"faq"|"transfer"|"none", ...}
+  costEstimateUsd  Decimal   @default(0)
+  costActualUsd    Decimal   @default(0) // provider-reported (reconciled); Decimal, never Float
+  isSimulated      Boolean   @default(true)
+  aiDisclosed      Boolean   @default(false)
+  recordingConsent String    @default("not-applicable") // granted | declined | not-applicable
+  // Voice/telefony linkage (Phase B/C)
+  provider         String    @default("mock") // mock | deepgram | twilio
+  providerCallId   String?   @unique // Twilio CallSid — idempotency + dedupe
+  streamSid        String?
+  endedAt          DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([workspaceId, startedAt])
+  @@index([agentId])
+}
+
+// ------------------------------------------------------------------- usage
+model UsageRecord {
+  id           String    @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  period       String    // YYYY-MM
+  minutes      Float     @default(0)
+  calls        Int       @default(0)
+  providerCost Decimal   @default(0)
+  // Provider-reported (reconciled) vs estimated — dashboard shows both.
+  providerReportedMinutes Float   @default(0)
+  providerReportedCost    Decimal @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([workspaceId, period])
+}
+
+// ------------------------------------------------------------- integrations
+model Integration {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  type        String    // google_calendar | calendly | crm | email | webhook | wordpress
+  name        String
+  configEnc   String    @db.Text // AES-GCM encrypted JSON (server-side only)
+  status      String    @default("disabled") // connected | error | disabled
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------- providers
+model ProviderConfig {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  provider    String    // mock | twilio | vapi | retell
+  credentialsEnc String @db.Text @default("") // AES-GCM encrypted JSON (server-side only)
+  enabled     Boolean   @default(false)
+  isLive      Boolean   @default(false) // live telephony requires explicit setup + credentials
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([workspaceId, provider])
+}
+
+// ------------------------------------------------------------------ billing
+model BillingPlan {
+  id             String   @id @default(cuid())
+  key            String   @unique // free | starter | business | agency | whitelabel
+  name           String
+  priceMonthlyUsd Decimal
+  includedMinutes Float
+  overagePerMinUsd Decimal
+  maxWorkspaces  Int
+  maxAgents      Int
+  features       Json
+  isActive       Boolean  @default(true)
+  organizations  Organization[]
+}
+
+// ------------------------------------------------------- voice / telephony
+// Phone number inventory: the trust anchor for inbound calls.
+// Inbound webhook resolves PhoneNumber.e164 -> (workspaceId, agentId), server-side only.
+model PhoneNumber {
+  id           String    @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  e164         String    @unique
+  agentId      String?   // default agent for inbound calls to this number
+  provider     String    @default("twilio") // twilio
+  providerSid  String?
+  monthlyCostUsd Decimal @default(0) // Decimal, never Float (advisor fix)
+  status       String    @default("active") // active | released
+  createdAt    DateTime  @default(now())
+
+  @@index([workspaceId])
+}
+
+// Configurable rate card — NO price literals in code. Each row records its
+// source + effective date; a quarterly job re-verifies against provider pages.
+// Promo credits are tracked separately, never as the rate.
+model RateCard {
+  id          String   @id @default(cuid())
+  provider    String   // deepgram | twilio | ...
+  metric      String   // voice_min | telephony_in_min | telephony_out_min | number_mo | transfer_min
+  unitPriceUsd Decimal // Decimal, never Float (advisor fix)
+  currency    String   @default("USD")
+  effectiveFrom DateTime @default(now())
+  source      String   @default("") // e.g. "provider-page 2026-10-18" | "measured"
+  createdAt   DateTime @default(now())
+
+  @@index([provider, metric])
+}
+
+// Webhook idempotency: every provider event processed exactly once.
+// The tool result is stored so retried deliveries replay the SAME result
+// instead of re-executing (prevents double-booking on retry).
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  provider    String   // twilio | deepgram | bridge
+  eventId     String   @unique // provider event id / idempotency key
+  workspaceId String?
+  result      Json?    // stored tool/call result for idempotent replay
+  processedAt DateTime @default(now())
+
+  @@index([provider, processedAt])
+}
+
+// -------------------------------------------------------------------- audit
+model AuditLog {
+  id         String       @id @default(cuid())
+  orgId      String
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String       // e.g. agent.publish, tool.book_appointment, auth.signin
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime     @default(now())
+
+  @@index([orgId, createdAt])
+}
