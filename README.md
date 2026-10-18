@@ -34,3 +34,16 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## PWA icons
+
+The PWA icon PNGs (`public/icon-192.png`, `public/icon-512.png`,
+`public/icon-maskable-512.png`, `public/apple-touch-icon.png`) are binary
+files and are intentionally NOT committed (they cannot be pushed through the
+GitHub MCP file tools without byte corruption). After cloning, regenerate them
+locally:
+
+```bash
+pip install pillow
+python3 public/icons/generate-icons.py
+```
